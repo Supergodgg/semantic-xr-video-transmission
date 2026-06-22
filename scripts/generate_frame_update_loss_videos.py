@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate frame-level packet-loss videos for robustness experiments.
+Generate frame-level update-loss videos for robustness experiments.
 
 The script uses the same loss mask for all compared methods at a given loss
 rate. Lost frames are replaced by the most recent received frame
@@ -11,9 +11,9 @@ Dependencies:
   - ffmpeg and ffprobe available on PATH
 
 Example:
-  python /gpfs/home/zlin/topic/generate_packet_loss_videos.py \
+  python /gpfs/home/zlin/topic/generate_frame_update_loss_videos.py \
     --dataset regular \
-    --methods ours=Tenth_drift_v4_15_output.mp4 h264=v4_h264_200k.mp4 vp9=v4_vp9_200k.mp4 \
+    --methods ours=lrc_laq_semantic_codec_regular_s15_output.mp4 h264=v4_h264_200k.mp4 vp9=v4_vp9_200k.mp4 \
     --loss-rates 0 10 20 30 \
     --seed 42
 
@@ -313,7 +313,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     masks_dir = output_dir / "masks"
     videos_dir = output_dir / "videos"
-    summary_path = output_dir / f"{args.dataset}_packet_loss_summary.csv"
+    summary_path = output_dir / f"{args.dataset}_frame_update_loss_summary.csv"
 
     frame_root_context = tempfile.TemporaryDirectory()
     if args.keep_frames:

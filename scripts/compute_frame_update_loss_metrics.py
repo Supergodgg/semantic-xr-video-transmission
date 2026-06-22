@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compute packet-loss robustness metrics: PSNR, SSIM, CLIP similarity, and YOLO F1.
+Compute frame-update-loss robustness metrics: PSNR, SSIM, CLIP similarity, and YOLO F1.
 
 This script is designed for the project HPC layout:
   /gpfs/home/zlin/topic/
@@ -15,7 +15,7 @@ Metrics:
   - YOLO F1 is computed on sampled regular-video frames by treating detections
     on the original video as pseudo-ground-truth. This is not a human-labelled
     detection benchmark; it measures whether object-level detections are
-    preserved after packet loss.
+    preserved after frame-level update loss.
 
 Dependencies:
   - ffmpeg and ffprobe on PATH
@@ -26,7 +26,7 @@ Dependencies:
       ultralytics, torch, pillow
 
 Example:
-  python /gpfs/home/zlin/topic/compute_packet_loss_all_metrics.py \
+  python /gpfs/home/zlin/topic/compute_frame_update_loss_metrics.py \
     --sample-stride 10 \
     --yolo-classes 2 3 5 7
 """
@@ -180,7 +180,7 @@ def discover_items(root: Path, videos_dir: Path) -> list[EvaluationItem]:
             )
         )
     if not items:
-        raise RuntimeError(f"No packet-loss videos found in {videos_dir}")
+        raise RuntimeError(f"No frame-update-loss videos found in {videos_dir}")
     return items
 
 
@@ -403,7 +403,7 @@ def main() -> int:
 
     root = args.root.resolve()
     videos_dir = (args.videos_dir or (root / "robustness_results" / "videos")).resolve()
-    output = (args.output or (root / "robustness_results" / "packet_loss_all_metrics.csv")).resolve()
+    output = (args.output or (root / "robustness_results" / "frame_update_loss_metrics.csv")).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
     items = discover_items(root, videos_dir)

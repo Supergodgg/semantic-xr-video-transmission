@@ -1,19 +1,18 @@
 """
-Tenth Drift - Enhanced Two-Level Semantic Video Codec for Panoramic Video
+Ninth Drift - Two-Level Semantic Video Codec
 
-Built upon Ninth Drift with key improvements for ERP panoramic video:
-  1. Latitude-Adaptive Quantization (LAQ): ERP-aware spatially-varying
-     quantization. Equator = high precision, poles = low precision.
-
-Core architecture (unchanged):
+Core idea: CLIP embedding cosine similarity drives adaptive skip.
   Level 1 (sim > THR_HIGH):  Skip frame, reuse previous        → 0 KB
-  Level 2 (all other frames): VAE latent + LAQ quantize + SwinIR
+  Level 2 (all other frames): VAE latent + quantize + SwinIR   → ~10-15 KB
+
+Each L2 frame is independently encoded — no dependency on previous frames,
+handles scene changes naturally without generative models.
 
 Evaluation: CLIP Score, LPIPS, SSIM, PSNR — all measured per-frame.
 
 Usage:
-  python Tenth_drift.py --calibrate
-  python Tenth_drift.py --input my.mp4 --frames 99999 --calibrate --l2_scale 1.5
+  python two_level_semantic_codec.py --calibrate                           # auto threshold
+  python two_level_semantic_codec.py --input my.mp4 --frames 99999 --calibrate --l2_scale 1.0
 """
 
 import os
@@ -38,15 +37,6 @@ import cv2
 from PIL import Image
 from skimage.metrics import structural_similarity as compare_ssim
 
-# ─── Compression backend ────────────────────────────────────────────
-import zlib
-try:
-    import zstandard as zstd
-    USE_ZSTD = True
-except ImportError:
-    USE_ZSTD = False
-    print("[INFO] zstandard not available, using zlib. Install: pip install zstandard")
-
 # ─── Device ─────────────────────────────────────────────────────────
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -63,20 +53,8 @@ THR_HIGH = 0.998  # above this → Level 1 (skip); below → Level 2
 
 # Level 2 params
 # scale=4.0 → ~29KB, scale=1.5 → ~12KB, scale=1.0 → ~8KB
-L2_QUANT_SCALE    = 1.2
+L2_QUANT_SCALE    = 1.5
 
-# ─── Latitude-Adaptive Quantization (LAQ) Parameters ────────────────
-# For ERP panoramic video: equator is visually important, poles are stretched
-# Key: keep equator at 1.0 (same as original), reduce poles aggressively
-# This REDUCES total information instead of just redistributing it
-LAQ_EQUATOR_BOOST  = 1.0   # scale multiplier at equator (maintain original precision)
-LAQ_POLE_REDUCTION = 0.3   # scale multiplier at poles   (aggressive reduction → saves bandwidth)
-
-# ─── Latent Residual Coding (LRC) ────────────────────────────────────
-# For L2 frames: encode latent residual (cur - prev) instead of full latent
-# Residuals are sparser → compress ~30-50% better
-# Falls back to full encoding on scene changes (CLIP sim < threshold)
-LRC_SIM_THR = 0.90  # use residual if CLIP sim > this; below = scene change → full
 
 # ════════════════════════════════════════════════════════════════════
 # Data classes for clean logging
@@ -92,8 +70,6 @@ class FrameResult:
     lpips: float
     ssim: float
     psnr: float
-    ws_ssim: float             # WS-SSIM: latitude-weighted SSIM for panoramic video
-    ws_psnr: float             # WS-PSNR: latitude-weighted PSNR for panoramic video
 
 
 @dataclass
@@ -111,22 +87,18 @@ class VideoResult:
         avg_lpips = np.mean([f.lpips for f in self.frame_results if f.lpips >= 0])
         avg_ssim  = np.mean([f.ssim for f in self.frame_results])
         avg_psnr  = np.mean([f.psnr for f in self.frame_results])
-        avg_ws_ssim = np.mean([f.ws_ssim for f in self.frame_results])
-        avg_ws_psnr = np.mean([f.ws_psnr for f in self.frame_results])
 
         lines = [
             f"\n{'='*70}",
-            f"  Tenth Drift — Summary ({n} frames)",
+            f"  Ninth Drift — Summary ({n} frames)",
             f"{'='*70}",
             f"  Level distribution:  L1(skip)={self.level_counts[1]}  "
             f"L2(VAE+SwinIR)={self.level_counts[2]}",
             f"  Avg TX size:   {avg_bytes/1024:.2f} KB/frame",
             f"  Avg CLIP Score:{avg_clip:.4f}  (semantic fidelity, higher=better)",
             f"  Avg LPIPS:     {avg_lpips:.4f}  (perceptual distance, lower=better)",
-            f"  Avg SSIM:      {avg_ssim:.4f}  (structural similarity)",
-            f"  Avg PSNR:      {avg_psnr:.2f} dB",
-            f"  Avg WS-SSIM:   {avg_ws_ssim:.4f}  (panoramic weighted SSIM, higher=better)",
-            f"  Avg WS-PSNR:   {avg_ws_psnr:.2f} dB  (panoramic weighted PSNR, higher=better)",
+            f"  Avg SSIM:      {avg_ssim:.4f}  (structural similarity, higher=better)",
+            f"  Avg PSNR:      {avg_psnr:.2f} dB  (pixel fidelity, reference only)",
             f"{'='*70}",
         ]
         return "\n".join(lines)
@@ -210,28 +182,8 @@ def clip_cosine_similarity(emb1, emb2):
 
 
 # ════════════════════════════════════════════════════════════════════
-# 3. Latitude-Adaptive Quantization (LAQ) for ERP panoramic video
-# ════════════════════════════════════════════════════════════════
-
-def get_latitude_scale_map(lat_h, lat_w, base_scale,
-                           equator_boost=LAQ_EQUATOR_BOOST,
-                           pole_reduction=LAQ_POLE_REDUCTION):
-    """Create spatially-varying quantization scale map based on ERP latitude.
-
-    For equirectangular projection, rows map directly to latitude:
-      - Middle rows (equator): visually important → high precision
-      - Top/bottom rows (poles): stretched, less important → low precision
-
-    Returns: Tensor of shape [1, 1, lat_h, 1], broadcastable over [B, C, H, W].
-    Reference: w(p,q) = cos((q - H/2 + 0.5) * pi / H)  (CLESC, Gao et al.)
-    """
-    q = torch.arange(lat_h, dtype=torch.float32)
-    lat_weight = torch.cos((q - lat_h / 2 + 0.5) * np.pi / lat_h)  # [0..1]
-    # Map: poles → pole_reduction, equator → equator_boost
-    scale_mult = pole_reduction + (equator_boost - pole_reduction) * lat_weight
-    scale_map = base_scale * scale_mult
-    return scale_map.reshape(1, 1, lat_h, 1).to(DEVICE)
-
+# 3. Level 2: Sparse latent residual (from Seventh Drift)
+# ════════════════════════════════════════════════════════════════════
 
 def encode_to_latent(img_np, vae):
     """Encode RGB image to VAE latent."""
@@ -304,43 +256,6 @@ def calc_clip_score(img1_np, img2_np, clip_model, clip_proc):
     return score
 
 
-def _erp_latitude_weight(h, w):
-    """Compute ERP latitude weight map: w(p,q) = cos((q - H/2 + 0.5) * pi / H).
-    Returns: numpy array of shape [H, W].
-    """
-    rows = np.arange(h, dtype=np.float64)
-    weight_1d = np.cos((rows - h / 2 + 0.5) * np.pi / h)
-    return np.broadcast_to(weight_1d[:, np.newaxis], (h, w))
-
-
-def calc_ws_psnr(img1, img2):
-    """Weighted-to-Spherically-uniform PSNR for ERP panoramic images.
-    Reference: WS-PSNR metric from Sun et al. / JVET.
-    """
-    h, w = img1.shape[:2]
-    weight = _erp_latitude_weight(h, w)
-    diff_sq = (img1.astype(np.float64) - img2.astype(np.float64)) ** 2
-    # Average over RGB channels
-    diff_sq = diff_sq.mean(axis=2)
-    wmse = np.sum(diff_sq * weight) / np.sum(weight)
-    if wmse == 0:
-        return 100.0
-    return 10.0 * np.log10(255.0 ** 2 / wmse)
-
-
-def calc_ws_ssim(img1, img2):
-    """Weighted-to-Spherically-uniform SSIM for ERP panoramic images.
-    Computes full SSIM map then weights by latitude.
-    """
-    h, w = img1.shape[:2]
-    weight = _erp_latitude_weight(h, w)
-    # Get full SSIM map
-    _, ssim_map = compare_ssim(img1, img2, channel_axis=2, data_range=255, full=True)
-    # Average over channels → [H, W]
-    ssim_map_avg = ssim_map.mean(axis=2)
-    return float(np.sum(ssim_map_avg * weight) / np.sum(weight))
-
-
 # ════════════════════════════════════════════════════════════════════
 # 6. Calibration: scan video to auto-detect thresholds
 # ════════════════════════════════════════════════════════════════════
@@ -402,7 +317,7 @@ def calibrate_thresholds(input_video, num_frames, clip_model, clip_proc,
 # 7. Main codec loop
 # ════════════════════════════════════════════════════════════════════
 
-def run_tenth_drift(input_video, output_video, num_frames, models):
+def run_ninth_drift(input_video, output_video, num_frames, models):
     """Main processing loop."""
 
     clip_model = models["clip_model"]
@@ -428,15 +343,14 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
     result = VideoResult()
 
     # State
-    prev_clip_emb    = None
+    prev_clip_emb   = None
     prev_recon_img   = None   # RGB uint8
-    prev_rx_latent   = None   # LRC: previous L2 receiver-side latent for residual coding
 
     print(f"{'='*70}")
-    print(f"Tenth Drift — Enhanced Semantic Video Codec for Panoramic Video")
+    print(f"Ninth Drift — Two-Level Semantic Video Codec")
     print(f"  THR_HIGH={THR_HIGH} (L1 skip, everything else → L2)")
     print(f"  L1: reuse previous frame (0 KB)")
-    print(f"  L2: VAE latent + LAQ(base={L2_QUANT_SCALE}, eq={LAQ_EQUATOR_BOOST}, pole={LAQ_POLE_REDUCTION}) + SwinIR")
+    print(f"  L2: VAE latent + quantize(scale={L2_QUANT_SCALE}) + SwinIR (~12KB)")
     print(f"  Eval: CLIP Score + LPIPS + SSIM + PSNR")
     print(f"{'='*70}\n")
 
@@ -475,49 +389,14 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
             tx_bytes = 0
 
         else:
-            # ── Level 2: LAQ + Latent Residual Coding ──
+            # ── Level 2: Full quantized latent (independent per-frame) ──
+            import zlib
             cur_latent = encode_to_latent(frame_rgb, vae)
-
-            # Build latitude-adaptive scale map
-            _, _, lat_h, lat_w = cur_latent.shape
-            scale_map = get_latitude_scale_map(lat_h, lat_w, L2_QUANT_SCALE)
-
-            # Decide: residual or full encoding
-            use_residual = (prev_rx_latent is not None and clip_sim_prev > LRC_SIM_THR)
-
-            if use_residual:
-                # Encode residual (sparser → compresses better)
-                residual = cur_latent - prev_rx_latent
-                q = torch.round(residual * scale_map).to(torch.int8)
-            else:
-                # Full encoding (first frame or scene change)
-                q = torch.round(cur_latent * scale_map).to(torch.int8)
-
-            # Compress with zstd (better ratio) or zlib (fallback)
-            raw_bytes = q.cpu().numpy().tobytes()
-            if USE_ZSTD:
-                cctx = zstd.ZstdCompressor(level=19)
-                compressed = cctx.compress(raw_bytes)
-            else:
-                compressed = zlib.compress(raw_bytes, level=9)
-
-            # Decompress (receiver side)
-            if USE_ZSTD:
-                dctx = zstd.ZstdDecompressor()
-                decompressed = dctx.decompress(compressed)
-            else:
-                decompressed = zlib.decompress(compressed)
-
-            q_recv = np.frombuffer(decompressed, dtype=np.int8).copy()
-            dequant = torch.from_numpy(q_recv).float().to(DEVICE).reshape(q.shape) / scale_map
-
-            if use_residual:
-                rx_latent = prev_rx_latent + dequant
-            else:
-                rx_latent = dequant
-
+            q = torch.round(cur_latent * L2_QUANT_SCALE).to(torch.int8)
+            compressed = zlib.compress(q.cpu().numpy().tobytes(), level=9)
+            q_recv = np.frombuffer(zlib.decompress(compressed), dtype=np.int8).copy()
+            rx_latent = torch.from_numpy(q_recv).float().to(DEVICE).reshape(q.shape) / L2_QUANT_SCALE
             tx_bytes = len(compressed)
-            prev_rx_latent = rx_latent.clone()  # update reference for next frame
 
             recon_img = decode_from_latent(rx_latent, vae)
             recon_img = swinir_denoise(recon_img, swinir)
@@ -527,14 +406,11 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
         lpips_val  = calc_lpips(frame_rgb, recon_img, lpips_m)
         ssim_val   = calc_ssim(frame_rgb, recon_img)
         psnr_val   = calc_psnr(frame_rgb, recon_img)
-        ws_ssim_val = calc_ws_ssim(frame_rgb, recon_img)
-        ws_psnr_val = calc_ws_psnr(frame_rgb, recon_img)
 
         fr = FrameResult(
             idx=frame_idx, level=level, tx_bytes=tx_bytes,
             clip_sim_prev=clip_sim_prev, clip_score=clip_score,
             lpips=lpips_val, ssim=ssim_val, psnr=psnr_val,
-            ws_ssim=ws_ssim_val, ws_psnr=ws_psnr_val,
         )
         result.frame_results.append(fr)
         result.level_counts[level] += 1
@@ -547,8 +423,6 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
               f"CLIP={clip_score:.4f} | "
               f"SSIM={ssim_val:.4f} | "
               f"PSNR={psnr_val:.1f}dB | "
-              f"WS-SSIM={ws_ssim_val:.4f} | "
-              f"WS-PSNR={ws_psnr_val:.1f}dB | "
               f"{lp_str}")
 
         # ── Save comparison image (first 16 frames) ──
@@ -585,12 +459,10 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
         avg_lpips = np.mean([f.lpips for f in lv_frames if f.lpips >= 0]) if any(f.lpips >= 0 for f in lv_frames) else -1
         avg_ssim  = np.mean([f.ssim for f in lv_frames])
         avg_psnr  = np.mean([f.psnr for f in lv_frames])
-        avg_ws_ssim = np.mean([f.ws_ssim for f in lv_frames])
-        avg_ws_psnr = np.mean([f.ws_psnr for f in lv_frames])
         avg_kb    = np.mean([f.tx_bytes for f in lv_frames]) / 1024
         print(f"  Level {lv} ({len(lv_frames)} frames): "
               f"CLIP={avg_clip:.4f}  LPIPS={avg_lpips:.4f}  "
-              f"WS-SSIM={avg_ws_ssim:.4f}  WS-PSNR={avg_ws_psnr:.1f}dB  "
+              f"SSIM={avg_ssim:.4f}  PSNR={avg_psnr:.1f}dB  "
               f"avg={avg_kb:.2f}KB")
 
     # ── Save detailed results to JSON ──
@@ -607,8 +479,6 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
             "avg_lpips": float(np.mean([f.lpips for f in result.frame_results if f.lpips >= 0])),
             "avg_ssim": float(np.mean([f.ssim for f in result.frame_results])),
             "avg_psnr": float(np.mean([f.psnr for f in result.frame_results])),
-            "avg_ws_ssim": float(np.mean([f.ws_ssim for f in result.frame_results])),
-            "avg_ws_psnr": float(np.mean([f.ws_psnr for f in result.frame_results])),
         },
         "frames": [
             {
@@ -618,8 +488,6 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
                 "lpips": float(round(f.lpips, 6)),
                 "ssim": float(round(f.ssim, 6)),
                 "psnr": float(round(f.psnr, 4)),
-                "ws_ssim": float(round(f.ws_ssim, 6)),
-                "ws_psnr": float(round(f.ws_psnr, 4)),
             }
             for f in result.frame_results
         ],
@@ -639,10 +507,10 @@ def run_tenth_drift(input_video, output_video, num_frames, models):
 # ════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tenth Drift — Enhanced Semantic Video Codec for Panoramic Video")
-    parser.add_argument("--input",  default="test_video_vr.mp4", help="Input video path")
-    parser.add_argument("--output", default="Tenth_drift_output.mp4", help="Output video path")
-    parser.add_argument("--frames", type=int, default=99999, help="Number of frames to process (99999 for full video)")
+    parser = argparse.ArgumentParser(description="Ninth Drift — Two-Level Semantic Video Codec")
+    parser.add_argument("--input",  default="test_video4.mp4", help="Input video path")
+    parser.add_argument("--output", default="two_level_semantic_codec_output.mp4", help="Output video path")
+    parser.add_argument("--frames", type=int, default=100, help="Number of frames to process (99999 for full video)")
     parser.add_argument("--thr_high", type=float, default=None, help="CLIP sim threshold for L1 skip")
     parser.add_argument("--calibrate", action="store_true",
                         help="Auto-detect threshold by scanning the video first")
@@ -652,8 +520,8 @@ if __name__ == "__main__":
                         help="L2 quantization scale (1.5=~12KB default, 1.0=~8KB, 2.0=~18KB)")
     args = parser.parse_args()
 
-    print("Tenth Drift — Enhanced Semantic Video Codec for Panoramic Video")
-    print(f"  L1: skip (0KB)  |  L2: VAE+LAQ+SwinIR\n")
+    print("Ninth Drift — Two-Level Semantic Video Codec")
+    print(f"  L1: skip (0KB)  |  L2: VAE+quantize+SwinIR (~10-15KB)\n")
 
     models = load_models()
 
@@ -670,4 +538,4 @@ if __name__ == "__main__":
     else:
         THR_HIGH = args.thr_high if args.thr_high is not None else THR_HIGH
 
-    run_tenth_drift(args.input, args.output, args.frames, models)
+    run_ninth_drift(args.input, args.output, args.frames, models)

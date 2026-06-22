@@ -68,25 +68,25 @@ The experiments lead to a conservative interpretation:
 
 ```text
 src/
-  Ninth_drift.py
+  two_level_semantic_codec.py
     Two-level semantic video prototype using CLIP, VAE latents, and SwinIR.
 
-  Tenth_drift.py
+  lrc_laq_semantic_codec.py
     Enhanced prototype with latent residual coding and latitude-adaptive
     quantization for panoramic video.
 
 scripts/
-  generate_packet_loss_videos.py
+  generate_frame_update_loss_videos.py
     Generates frame-level update loss videos with shared loss masks.
 
-  compute_packet_loss_quality.py
+  compute_frame_update_loss_quality.py
     Computes PSNR and SSIM for generated loss videos.
 
-  compute_packet_loss_all_metrics.py
+  compute_frame_update_loss_metrics.py
     Extended metric computation script for loss outputs.
 
 paper/
-  MSWiM2026_paper.tex
+  mswim2026_semantic_xr_video_transmission.tex
   bibliography.bib
   Figures/
     LaTeX source and figures for the conference paper draft.
@@ -98,7 +98,8 @@ results/
   summaries/
     CSV summaries of generated loss videos.
 
-  ninth_tenth_*_comparison.json
+  regular_video_variant_comparison.json
+  vr_video_variant_comparison.json
     Comparison outputs for prototype variants.
 ```
 
@@ -123,7 +124,7 @@ Install the lightweight Python dependencies with:
 pip install -r requirements.txt
 ```
 
-The main prototype scripts expect local pretrained resources. Before running in a new environment, update the following constants in `src/Ninth_drift.py` and `src/Tenth_drift.py`:
+The main prototype scripts expect local pretrained resources. Before running in a new environment, update the following constants in `src/two_level_semantic_codec.py` and `src/lrc_laq_semantic_codec.py`:
 
 - `PROJECT_ROOT`
 - `SWINIR_ROOT`
@@ -137,9 +138,9 @@ These paths are environment-specific and are not bundled in this repository.
 Generate frame-level update loss videos:
 
 ```bash
-python scripts/generate_packet_loss_videos.py \
+python scripts/generate_frame_update_loss_videos.py \
   --dataset vr \
-  --methods ours=Tenth_drift_vr_15_output.mp4 h264=vr_h264_200k.mp4 vp9=vr_vp9_200k.mp4 \
+  --methods ours=lrc_laq_semantic_codec_vr_s15_output.mp4 h264=vr_h264_200k.mp4 vp9=vr_vp9_200k.mp4 \
   --loss-rates 0 10 20 30 \
   --seed 42
 ```
@@ -147,7 +148,7 @@ python scripts/generate_packet_loss_videos.py \
 Compute PSNR and SSIM for generated loss videos:
 
 ```bash
-python scripts/compute_packet_loss_quality.py \
+python scripts/compute_frame_update_loss_quality.py \
   --root /path/to/experiment/root
 ```
 
@@ -155,10 +156,10 @@ Compile the paper:
 
 ```bash
 cd paper
-pdflatex -interaction=nonstopmode MSWiM2026_paper.tex
-bibtex MSWiM2026_paper
-pdflatex -interaction=nonstopmode MSWiM2026_paper.tex
-pdflatex -interaction=nonstopmode MSWiM2026_paper.tex
+pdflatex -interaction=nonstopmode mswim2026_semantic_xr_video_transmission.tex
+bibtex mswim2026_semantic_xr_video_transmission
+pdflatex -interaction=nonstopmode mswim2026_semantic_xr_video_transmission.tex
+pdflatex -interaction=nonstopmode mswim2026_semantic_xr_video_transmission.tex
 ```
 
 ## Reproducibility Notes

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compute PSNR and SSIM for packet-loss robustness videos.
+Compute PSNR and SSIM for frame-level update-loss robustness videos.
 
 The script is designed for the HPC folder layout used in this project:
   /gpfs/home/zlin/topic/
@@ -17,7 +17,7 @@ Dependencies:
   - ffmpeg available on PATH
 
 Example:
-  python /gpfs/home/zlin/topic/compute_packet_loss_quality.py
+  python /gpfs/home/zlin/topic/compute_frame_update_loss_quality.py
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def discover_items(root: Path, videos_dir: Path) -> list[EvaluationItem]:
         )
 
     if not items:
-        raise RuntimeError(f"No packet-loss videos found in {videos_dir}")
+        raise RuntimeError(f"No frame-update-loss videos found in {videos_dir}")
     return items
 
 
@@ -149,13 +149,13 @@ def main() -> int:
         "--videos-dir",
         type=Path,
         default=None,
-        help="Folder containing generated packet-loss videos. Default: root/robustness_results/videos.",
+        help="Folder containing generated frame-update-loss videos. Default: root/robustness_results/videos.",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="Output CSV. Default: root/robustness_results/packet_loss_quality_metrics.csv.",
+        help="Output CSV. Default: root/robustness_results/frame_update_loss_quality_metrics.csv.",
     )
     args = parser.parse_args()
 
@@ -163,7 +163,7 @@ def main() -> int:
 
     root = args.root.resolve()
     videos_dir = (args.videos_dir or (root / "robustness_results" / "videos")).resolve()
-    output = (args.output or (root / "robustness_results" / "packet_loss_quality_metrics.csv")).resolve()
+    output = (args.output or (root / "robustness_results" / "frame_update_loss_quality_metrics.csv")).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
     items = discover_items(root, videos_dir)
