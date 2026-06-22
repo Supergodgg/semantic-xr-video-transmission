@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# LaTeX build outputs
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+
+# Generated documents and archives
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+
+# Large media and generated videos
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# Model checkpoints and experiment artifacts
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+checkpoints/
+models/
+outputs/
+robustness_results/videos/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
