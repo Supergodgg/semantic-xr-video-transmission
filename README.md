@@ -20,6 +20,10 @@ This event-level representation allows the stream to be evaluated not only by av
 
 The prototype combines five main mechanisms:
 
+![Semantic XR transmission pipeline](paper/Figures/system_architecture.png)
+
+*Semantic XR transmission pipeline. The sender selects between semantic reuse, full latent updates, and residual latent updates. The receiver maintains cached visual and latent states that can be reused or refreshed depending on the received event.*
+
 1. **CLIP-based semantic reuse**
    Consecutive frames are compared using CLIP image embeddings. If the semantic similarity is high enough, the frame is assigned to a reuse event and no visual latent payload is transmitted.
 
@@ -50,6 +54,10 @@ The frame-level loss model is an application-layer abstraction. It removes compl
 ## Key Findings
 
 The experiments lead to a conservative interpretation:
+
+![Qualitative VR reconstruction examples](paper/Figures/qualitative_multiframe_vr.png)
+
+*Qualitative VR reconstruction examples showing original frames, reconstructed frames, error maps, and block-level error maps.*
 
 - LRC and LAQ reduce the prototype's own visual payload, especially on the tested panoramic sequence.
 - The optimized semantic stream remains less efficient than mature codecs in classical rate-distortion terms.
